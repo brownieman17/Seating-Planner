@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { Rnd } from 'react-rnd';
+import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 
 // Minimal, single-file React app that you can paste into a Next.js page (app/page.tsx) or Vite's App.tsx.
 // Features: add guests, assign tables, set table count & capacity, live per-table summary, search, and localStorage persistence.
@@ -19,6 +21,7 @@ interface Guest {
 
 interface Table {
   id: string;
+  name: string;
   number: number;
   x: number;
   y: number;
@@ -26,14 +29,45 @@ interface Table {
   height: number;
   capacity: number;
   shape: 'round' | 'rect';
+  rotation: number;
+  locked: boolean;
+  notes?: string;
   guests: string[]; // Array of guest IDs
+}
+
+interface Fixture {
+  id: string;
+  type: 'door' | 'window' | 'stage' | 'dance-floor' | 'dj-booth' | 'pillar' | 'text';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  locked: boolean;
+  label?: string;
+  color?: string;
+}
+
+interface RoomSettings {
+  width: number;
+  height: number;
+  background: string;
+  gridEnabled: boolean;
+  gridSize: number;
+  snapToGrid: boolean;
+  allowOverlap: boolean;
+  scale: number; // 1ft = scale pixels
 }
 
 interface CanvasState {
   tables: Table[];
-  selectedTable: string | null;
+  fixtures: Fixture[];
+  selectedItem: { type: 'table' | 'fixture'; id: string } | null;
   draggingGuest: string | null;
   dragOffset: { x: number; y: number };
+  mode: 'layout' | 'assign';
+  zoom: number;
+  pan: { x: number; y: number };
 }
 
 // ----------------------
@@ -120,6 +154,7 @@ function parseExcel(file: File): Promise<string[]> {
 // App
 // ----------------------
 export default function SeatingPlanner() {
+  const sensors = useSensors(useSensor(PointerSensor));
   const [eventName, setEventName] = useState("My Event");
   const [tables, setTables] = useState(16); // number of tables
   const [capacity, setCapacity] = useState(10); // seats per table
@@ -135,9 +170,23 @@ export default function SeatingPlanner() {
   const [showCanvas, setShowCanvas] = useState(false);
   const [canvasState, setCanvasState] = useState<CanvasState>({
     tables: [],
-    selectedTable: null,
+    fixtures: [],
+    selectedItem: null,
     draggingGuest: null,
-    dragOffset: { x: 0, y: 0 }
+    dragOffset: { x: 0, y: 0 },
+    mode: 'layout',
+    zoom: 1,
+    pan: { x: 0, y: 0 }
+  });
+  const [roomSettings, setRoomSettings] = useState<RoomSettings>({
+    width: 1200,
+    height: 800,
+    background: '#f8fafc',
+    gridEnabled: true,
+    gridSize: 10,
+    snapToGrid: true,
+    allowOverlap: false,
+    scale: 20 // 1ft = 20px
   });
 
   // Load persisted state
@@ -148,14 +197,33 @@ export default function SeatingPlanner() {
       setTables(saved.tables ?? 16);
       setCapacity(saved.capacity ?? 10);
       setGuests(saved.guests ?? []);
-      setCanvasState(saved.canvasState ?? { tables: [], selectedTable: null, draggingGuest: null, dragOffset: { x: 0, y: 0 } });
+      setCanvasState(saved.canvasState ?? { 
+        tables: [], 
+        fixtures: [],
+        selectedItem: null, 
+        draggingGuest: null, 
+        dragOffset: { x: 0, y: 0 },
+        mode: 'layout',
+        zoom: 1,
+        pan: { x: 0, y: 0 }
+      });
+      setRoomSettings(saved.roomSettings ?? {
+        width: 1200,
+        height: 800,
+        background: '#f8fafc',
+        gridEnabled: true,
+        gridSize: 10,
+        snapToGrid: true,
+        allowOverlap: false,
+        scale: 20
+      });
     }
   }, []);
 
   // Persist on changes
   useEffect(() => {
-    saveState({ eventName, tables, capacity, guests, canvasState });
-  }, [eventName, tables, capacity, guests, canvasState]);
+    saveState({ eventName, tables, capacity, guests, canvasState, roomSettings });
+  }, [eventName, tables, capacity, guests, canvasState, roomSettings]);
 
   const filteredGuests = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -251,6 +319,7 @@ export default function SeatingPlanner() {
     const tableNumber = canvasState.tables.length + 1;
     return {
       id: uid(),
+      name: `Table ${tableNumber}`,
       number: tableNumber,
       x,
       y,
@@ -258,6 +327,8 @@ export default function SeatingPlanner() {
       height: shape === 'round' ? 120 : 100,
       capacity: 8,
       shape,
+      rotation: 0,
+      locked: false,
       guests: []
     };
   }
@@ -361,21 +432,21 @@ export default function SeatingPlanner() {
 
   function handleTableDragStart(e: React.MouseEvent, tableId: string) {
     e.stopPropagation();
-    setCanvasState(prev => ({ ...prev, selectedTable: tableId }));
+    setCanvasState(prev => ({ ...prev, selectedItem: { type: 'table', id: tableId } }));
   }
 
   function handleTableDrag(e: React.MouseEvent) {
-    if (!canvasState.selectedTable) return;
+    if (!canvasState.selectedItem || canvasState.selectedItem.type !== 'table') return;
     
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     
-    updateTablePosition(canvasState.selectedTable, x, y);
+    updateTablePosition(canvasState.selectedItem.id, x, y);
   }
 
   function handleTableDragEnd() {
-    setCanvasState(prev => ({ ...prev, selectedTable: null }));
+    setCanvasState(prev => ({ ...prev, selectedItem: null }));
   }
 
   function handleGuestDragStart(e: React.MouseEvent, guestId: string) {
@@ -415,6 +486,212 @@ export default function SeatingPlanner() {
 
   function handleGuestDragEnd() {
     setCanvasState(prev => ({ ...prev, draggingGuest: null }));
+  }
+
+  // Enhanced room designer functions
+  function snapToGrid(value: number): number {
+    if (!roomSettings.snapToGrid) return value;
+    return Math.round(value / roomSettings.gridSize) * roomSettings.gridSize;
+  }
+
+  function createFixture(type: Fixture['type'], x: number, y: number): Fixture {
+    const defaultSizes = {
+      door: { width: 40, height: 80 },
+      window: { width: 60, height: 40 },
+      stage: { width: 200, height: 120 },
+      'dance-floor': { width: 150, height: 150 },
+      'dj-booth': { width: 80, height: 60 },
+      pillar: { width: 30, height: 30 },
+      text: { width: 100, height: 40 }
+    };
+
+    return {
+      id: uid(),
+      type,
+      x: snapToGrid(x),
+      y: snapToGrid(y),
+      width: defaultSizes[type].width,
+      height: defaultSizes[type].height,
+      rotation: 0,
+      locked: false,
+      label: type === 'text' ? 'Text Label' : undefined,
+      color: type === 'text' ? '#000000' : undefined
+    };
+  }
+
+  function addFixtureToCanvas(type: Fixture['type'], x: number, y: number) {
+    const newFixture = createFixture(type, x, y);
+    setCanvasState(prev => ({
+      ...prev,
+      fixtures: [...prev.fixtures, newFixture]
+    }));
+  }
+
+  function updateFixturePosition(fixtureId: string, x: number, y: number) {
+    setCanvasState(prev => ({
+      ...prev,
+      fixtures: prev.fixtures.map(fixture => 
+        fixture.id === fixtureId ? { ...fixture, x: snapToGrid(x), y: snapToGrid(y) } : fixture
+      )
+    }));
+  }
+
+  function updateFixtureSize(fixtureId: string, width: number, height: number) {
+    setCanvasState(prev => ({
+      ...prev,
+      fixtures: prev.fixtures.map(fixture => 
+        fixture.id === fixtureId ? { ...fixture, width: snapToGrid(width), height: snapToGrid(height) } : fixture
+      )
+    }));
+  }
+
+  function updateFixtureRotation(fixtureId: string, rotation: number) {
+    setCanvasState(prev => ({
+      ...prev,
+      fixtures: prev.fixtures.map(fixture => 
+        fixture.id === fixtureId ? { ...fixture, rotation } : fixture
+      )
+    }));
+  }
+
+  function removeFixtureFromCanvas(fixtureId: string) {
+    setCanvasState(prev => ({
+      ...prev,
+      fixtures: prev.fixtures.filter(f => f.id !== fixtureId)
+    }));
+  }
+
+  function toggleFixtureLock(fixtureId: string) {
+    setCanvasState(prev => ({
+      ...prev,
+      fixtures: prev.fixtures.map(fixture => 
+        fixture.id === fixtureId ? { ...fixture, locked: !fixture.locked } : fixture
+      )
+    }));
+  }
+
+  function updateTableRotation(tableId: string, rotation: number) {
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(table => 
+        table.id === tableId ? { ...table, rotation } : table
+      )
+    }));
+  }
+
+  function toggleTableLock(tableId: string) {
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(table => 
+        table.id === tableId ? { ...table, locked: !table.locked } : table
+      )
+    }));
+  }
+
+  function exportLayoutToJSON() {
+    const layoutData = {
+      roomSettings,
+      tables: canvasState.tables,
+      fixtures: canvasState.fixtures,
+      exportDate: new Date().toISOString()
+    };
+    
+    const blob = new Blob([JSON.stringify(layoutData, null, 2)], { type: 'application/json' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${eventName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_layout.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  }
+
+  function importLayoutFromJSON(file: File) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const layoutData = JSON.parse(e.target?.result as string);
+        if (layoutData.roomSettings) setRoomSettings(layoutData.roomSettings);
+        if (layoutData.tables) setCanvasState(prev => ({ ...prev, tables: layoutData.tables }));
+        if (layoutData.fixtures) setCanvasState(prev => ({ ...prev, fixtures: layoutData.fixtures }));
+      } catch (error) {
+        alert('Error importing layout file');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    const { active } = event;
+    setCanvasState(prev => ({ ...prev, draggingGuest: active.id as string }));
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    
+    if (over && over.id) {
+      // Check if dropping on a table
+      const table = canvasState.tables.find(t => t.id === over.id);
+      if (table) {
+        addGuestToTable(active.id as string, table.id);
+      }
+    }
+    
+    setCanvasState(prev => ({ ...prev, draggingGuest: null }));
+  }
+
+  function handleKeyboardNavigation(e: React.KeyboardEvent) {
+    if (!canvasState.selectedItem) return;
+    
+    const moveAmount = e.shiftKey ? 10 : 1;
+    const { selectedItem } = canvasState;
+    
+    if (selectedItem.type === 'table') {
+      const table = canvasState.tables.find(t => t.id === selectedItem.id);
+      if (!table || table.locked) return;
+      
+      switch (e.key) {
+        case 'ArrowUp':
+          updateTablePosition(selectedItem.id, table.x, table.y - moveAmount);
+          break;
+        case 'ArrowDown':
+          updateTablePosition(selectedItem.id, table.x, table.y + moveAmount);
+          break;
+        case 'ArrowLeft':
+          updateTablePosition(selectedItem.id, table.x - moveAmount, table.y);
+          break;
+        case 'ArrowRight':
+          updateTablePosition(selectedItem.id, table.x + moveAmount, table.y);
+          break;
+        case 'Delete':
+          removeTableFromCanvas(selectedItem.id);
+          setCanvasState(prev => ({ ...prev, selectedItem: null }));
+          break;
+      }
+    } else if (selectedItem.type === 'fixture') {
+      const fixture = canvasState.fixtures.find(f => f.id === selectedItem.id);
+      if (!fixture || fixture.locked) return;
+      
+      switch (e.key) {
+        case 'ArrowUp':
+          updateFixturePosition(selectedItem.id, fixture.x, fixture.y - moveAmount);
+          break;
+        case 'ArrowDown':
+          updateFixturePosition(selectedItem.id, fixture.x, fixture.y + moveAmount);
+          break;
+        case 'ArrowLeft':
+          updateFixturePosition(selectedItem.id, fixture.x - moveAmount, fixture.y);
+          break;
+        case 'ArrowRight':
+          updateFixturePosition(selectedItem.id, fixture.x + moveAmount, fixture.y);
+          break;
+        case 'Delete':
+          removeFixtureFromCanvas(selectedItem.id);
+          setCanvasState(prev => ({ ...prev, selectedItem: null }));
+          break;
+      }
+    }
   }
 
   function removeGuest(id: string) {
@@ -946,13 +1223,24 @@ export default function SeatingPlanner() {
           </aside>
         </section>
 
-        {/* Room Canvas */}
+        {/* Enhanced Room Designer */}
         {showCanvas && (
           <section className="mt-6">
             <div className="rounded-2xl bg-white p-4 shadow">
+              {/* Toolbar */}
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Room Layout</h2>
+                <h2 className="text-lg font-semibold">Room Designer</h2>
                 <div className="flex gap-2">
+                  <button
+                    onClick={() => setCanvasState(prev => ({ ...prev, mode: prev.mode === 'layout' ? 'assign' : 'layout' }))}
+                    className={`rounded-xl px-3 py-2 text-sm shadow-sm ${
+                      canvasState.mode === 'layout' 
+                        ? 'bg-blue-100 text-blue-700' 
+                        : 'bg-green-100 text-green-700'
+                    }`}
+                  >
+                    {canvasState.mode === 'layout' ? 'Layout Mode' : 'Assign Mode'}
+                  </button>
                   <button
                     onClick={() => addTableToCanvas(100, 100, 'round')}
                     className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
@@ -963,122 +1251,289 @@ export default function SeatingPlanner() {
                     onClick={() => addTableToCanvas(100, 100, 'rect')}
                     className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
                   >
-                    Add Rectangular Table
+                    Add Rect Table
                   </button>
-                </div>
-              </div>
-              
-              <div className="mb-4 text-sm text-gray-600">
-                <p>• Click anywhere on the canvas to add a round table</p>
-                <p>• Drag tables to reposition them</p>
-                <p>• Drag guests from the list onto tables</p>
-                <p>• Right-click tables to edit capacity or remove</p>
-              </div>
-
-              <div className="relative">
-                {/* Canvas */}
-                <div 
-                  className="relative w-full h-96 bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl cursor-crosshair overflow-hidden"
-                  onClick={handleCanvasClick}
-                  onMouseMove={handleTableDrag}
-                  onMouseUp={handleTableDragEnd}
-                >
-                  {/* Tables */}
-                  {canvasState.tables.map((table) => (
-                    <div
-                      key={table.id}
-                      className={`absolute cursor-move ${
-                        canvasState.selectedTable === table.id ? 'ring-2 ring-blue-500' : ''
-                      }`}
-                      style={{
-                        left: table.x,
-                        top: table.y,
-                        width: table.width,
-                        height: table.height
-                      }}
-                      onMouseDown={(e) => handleTableDragStart(e, table.id)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        const action = prompt(
-                          `Table ${table.number} (${table.guests.length}/${table.capacity})\n\n1. Change capacity\n2. Remove table\n\nEnter 1 or 2:`
-                        );
-                        if (action === '1') {
-                          const newCapacity = prompt(`Enter new capacity (current: ${table.capacity}):`);
-                          if (newCapacity) {
-                            const capacity = parseInt(newCapacity);
-                            if (!isNaN(capacity) && capacity > 0) {
-                              updateTableCapacity(table.id, capacity);
-                            }
-                          }
-                        } else if (action === '2') {
-                          if (confirm(`Remove table ${table.number}?`)) {
-                            removeTableFromCanvas(table.id);
-                          }
+                  <select
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        addFixtureToCanvas(e.target.value as Fixture['type'], 100, 100);
+                        e.target.value = '';
+                      }
+                    }}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2"
+                  >
+                    <option value="">Add Fixture...</option>
+                    <option value="door">Door</option>
+                    <option value="window">Window</option>
+                    <option value="stage">Stage</option>
+                    <option value="dance-floor">Dance Floor</option>
+                    <option value="dj-booth">DJ Booth</option>
+                    <option value="pillar">Pillar</option>
+                    <option value="text">Text Label</option>
+                  </select>
+                  <button
+                    onClick={() => {
+                      const settings = prompt(
+                        `Room Settings (comma-separated):\nWidth,Height,Grid Size,Scale\nCurrent: ${roomSettings.width},${roomSettings.height},${roomSettings.gridSize},${roomSettings.scale}`
+                      );
+                      if (settings) {
+                        const [width, height, gridSize, scale] = settings.split(',').map(s => parseInt(s.trim()));
+                        if (width && height && gridSize && scale) {
+                          setRoomSettings(prev => ({ ...prev, width, height, gridSize, scale }));
                         }
-                      }}
-                    >
-                      {/* Table shape */}
-                      <div
-                        className={`w-full h-full border-2 border-gray-400 bg-white flex flex-col items-center justify-center ${
-                          table.shape === 'round' ? 'rounded-full' : 'rounded-lg'
-                        }`}
-                      >
-                        <div className="text-sm font-bold">Table {table.number}</div>
-                        <div className="text-xs text-gray-600">
-                          {table.guests.length}/{table.capacity}
-                        </div>
-                      </div>
-                      
-                      {/* Guests at table */}
-                      <div className="absolute -bottom-8 left-0 right-0">
-                        <div className="flex flex-wrap gap-1 justify-center">
-                          {table.guests.map((guestId) => {
-                            const guest = guests.find(g => g.id === guestId);
-                            return guest ? (
-                              <div
-                                key={guestId}
-                                className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full cursor-move"
-                                draggable
-                                onDragStart={(e) => handleGuestDragStart(e, guestId)}
-                                onDragEnd={handleGuestDragEnd}
-                                title={guest.name}
-                              >
-                                {guest.name.split(' ')[0]}
-                              </div>
-                            ) : null;
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                      }
+                    }}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                  >
+                    Room Settings
+                  </button>
+                  <button
+                    onClick={() => setRoomSettings(prev => ({ ...prev, snapToGrid: !prev.snapToGrid }))}
+                    className={`rounded-xl px-3 py-2 text-sm shadow-sm ${
+                      roomSettings.snapToGrid 
+                        ? 'bg-green-100 text-green-700' 
+                        : 'bg-gray-100 text-gray-700'
+                    }`}
+                  >
+                    Snap: {roomSettings.snapToGrid ? 'ON' : 'OFF'}
+                  </button>
+                  <button
+                    onClick={() => setRoomSettings(prev => ({ ...prev, gridEnabled: !prev.gridEnabled }))}
+                    className={`rounded-xl px-3 py-2 text-sm shadow-sm ${
+                      roomSettings.gridEnabled 
+                        ? 'bg-blue-100 text-blue-700' 
+                        : 'bg-gray-100 text-gray-700'
+                    }`}
+                  >
+                    Grid: {roomSettings.gridEnabled ? 'ON' : 'OFF'}
+                  </button>
+                  <button
+                    onClick={exportLayoutToJSON}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                  >
+                    Export Layout
+                  </button>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        importLayoutFromJSON(file);
+                        e.target.value = '';
+                      }
+                    }}
+                    className="hidden"
+                    id="layout-import"
+                  />
+                  <label
+                    htmlFor="layout-import"
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100 cursor-pointer"
+                  >
+                    Import Layout
+                  </label>
                 </div>
+              </div>
 
-                {/* Unassigned guests panel */}
-                <div className="mt-4 p-4 bg-gray-50 rounded-xl">
-                  <h3 className="text-sm font-semibold mb-2">Unassigned Guests</h3>
-                  <div className="flex flex-wrap gap-2">
-                    {guests.filter(g => !g.table).map((guest) => (
+              <div className="flex gap-4">
+                {/* Fixture Palette */}
+                <div className="w-48 p-4 bg-gray-50 rounded-xl">
+                  <h3 className="text-sm font-semibold mb-3">Fixtures</h3>
+                  <div className="space-y-2">
+                    {(['door', 'window', 'stage', 'dance-floor', 'dj-booth', 'pillar', 'text'] as const).map((type) => (
                       <div
-                        key={guest.id}
-                        className="px-3 py-2 bg-white border border-gray-300 rounded-lg cursor-move shadow-sm hover:shadow-md transition-shadow"
+                        key={type}
+                        className="p-2 bg-white border border-gray-300 rounded cursor-move hover:shadow-sm transition-shadow"
                         draggable
-                        onDragStart={(e) => handleGuestDragStart(e, guest.id)}
-                        onDragEnd={handleGuestDragEnd}
-                        title={guest.name}
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('text/plain', type);
+                        }}
                       >
-                        <div className="text-sm font-medium">{guest.name}</div>
-                        {guest.tags.length > 0 && (
-                          <div className="flex gap-1 mt-1">
-                            {guest.tags.slice(0, 2).map((tag, index) => (
-                              <span key={index} className="px-1 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        )}
+                        <div className="text-xs font-medium capitalize">{type.replace('-', ' ')}</div>
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* Canvas */}
+                <div className="flex-1">
+                  <DndContext
+                    sensors={sensors}
+                    onDragStart={handleDragStart}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <div 
+                      className="relative border-2 border-dashed border-gray-300 rounded-xl cursor-crosshair overflow-hidden"
+                      style={{
+                        width: roomSettings.width,
+                        height: roomSettings.height,
+                        background: roomSettings.background,
+                        backgroundImage: roomSettings.gridEnabled 
+                          ? `linear-gradient(to right, #e5e7eb 1px, transparent 1px), linear-gradient(to bottom, #e5e7eb 1px, transparent 1px)`
+                          : 'none',
+                        backgroundSize: roomSettings.gridEnabled ? `${roomSettings.gridSize}px ${roomSettings.gridSize}px` : 'auto'
+                      }}
+                      onClick={handleCanvasClick}
+                      onKeyDown={handleKeyboardNavigation}
+                      tabIndex={0}
+                    >
+                      {/* Fixtures */}
+                      {canvasState.fixtures.map((fixture) => (
+                        <Rnd
+                          key={fixture.id}
+                          position={{ x: fixture.x, y: fixture.y }}
+                          size={{ width: fixture.width, height: fixture.height }}
+                          onDragStop={(e, d) => {
+                            if (!fixture.locked) {
+                              updateFixturePosition(fixture.id, d.x, d.y);
+                            }
+                          }}
+                                                     onResizeStop={(e, direction, ref, delta, position) => {
+                             if (!fixture.locked) {
+                               updateFixtureSize(fixture.id, parseInt(ref.style.width), parseInt(ref.style.height));
+                               updateFixturePosition(fixture.id, position.x, position.y);
+                             }
+                           }}
+                          disableDragging={fixture.locked}
+                          enableResizing={!fixture.locked}
+                          bounds="parent"
+                          className={`${fixture.locked ? 'opacity-50' : ''}`}
+                        >
+                          <div
+                            className={`w-full h-full border-2 border-gray-400 bg-white flex items-center justify-center ${
+                              fixture.type === 'text' ? 'text-sm' : 'text-xs'
+                            }`}
+                            style={{
+                              transform: `rotate(${fixture.rotation}deg)`,
+                              backgroundColor: fixture.color || '#ffffff'
+                            }}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              const action = prompt(
+                                `${fixture.type} (${fixture.width}x${fixture.height})\n\n1. Lock/Unlock\n2. Remove\n3. Edit label (text only)\n\nEnter 1, 2, or 3:`
+                              );
+                              if (action === '1') {
+                                toggleFixtureLock(fixture.id);
+                              } else if (action === '2') {
+                                if (confirm(`Remove ${fixture.type}?`)) {
+                                  removeFixtureFromCanvas(fixture.id);
+                                }
+                              } else if (action === '3' && fixture.type === 'text') {
+                                const label = prompt('Enter label:', fixture.label);
+                                if (label !== null) {
+                                  setCanvasState(prev => ({
+                                    ...prev,
+                                    fixtures: prev.fixtures.map(f => 
+                                      f.id === fixture.id ? { ...f, label } : f
+                                    )
+                                  }));
+                                }
+                              }
+                            }}
+                          >
+                            {fixture.type === 'text' ? (fixture.label || 'Text') : fixture.type.toUpperCase()}
+                          </div>
+                        </Rnd>
+                      ))}
+
+                      {/* Tables */}
+                      {canvasState.tables.map((table) => (
+                        <Rnd
+                          key={table.id}
+                          position={{ x: table.x, y: table.y }}
+                          size={{ width: table.width, height: table.height }}
+                          onDragStop={(e, d) => {
+                            if (!table.locked) {
+                              updateTablePosition(table.id, d.x, d.y);
+                            }
+                          }}
+                          onResizeStop={(e, direction, ref, delta, position) => {
+                            if (!table.locked) {
+                              updateTableCapacity(table.id, Math.floor((parseInt(ref.style.width) * parseInt(ref.style.height)) / 100));
+                              updateTablePosition(table.id, position.x, position.y);
+                            }
+                          }}
+                          disableDragging={table.locked}
+                          enableResizing={!table.locked}
+                          bounds="parent"
+                          className={`${table.locked ? 'opacity-50' : ''}`}
+                          data-table-id={table.id}
+                        >
+                          <div
+                            className={`w-full h-full border-2 border-gray-400 bg-white flex flex-col items-center justify-center ${
+                              table.shape === 'round' ? 'rounded-full' : 'rounded-lg'
+                            }`}
+                            style={{
+                              transform: `rotate(${table.rotation}deg)`
+                            }}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              const action = prompt(
+                                `Table ${table.number} (${table.guests.length}/${table.capacity})\n\n1. Change capacity\n2. Lock/Unlock\n3. Remove table\n\nEnter 1, 2, or 3:`
+                              );
+                              if (action === '1') {
+                                const newCapacity = prompt(`Enter new capacity (current: ${table.capacity}):`);
+                                if (newCapacity) {
+                                  const capacity = parseInt(newCapacity);
+                                  if (!isNaN(capacity) && capacity > 0) {
+                                    updateTableCapacity(table.id, capacity);
+                                  }
+                                }
+                              } else if (action === '2') {
+                                toggleTableLock(table.id);
+                              } else if (action === '3') {
+                                if (confirm(`Remove table ${table.number}?`)) {
+                                  removeTableFromCanvas(table.id);
+                                }
+                              }
+                            }}
+                          >
+                            <div className="text-sm font-bold">Table {table.number}</div>
+                            <div className="text-xs text-gray-600">
+                              {table.guests.length}/{table.capacity}
+                            </div>
+                          </div>
+                        </Rnd>
+                      ))}
+
+                      <DragOverlay>
+                        {canvasState.draggingGuest ? (
+                          <div className="px-3 py-2 bg-blue-100 text-blue-800 text-sm rounded-lg shadow-lg">
+                            {guests.find(g => g.id === canvasState.draggingGuest)?.name}
+                          </div>
+                        ) : null}
+                      </DragOverlay>
+                    </div>
+                  </DndContext>
+
+                  {/* Unassigned guests panel */}
+                  {canvasState.mode === 'assign' && (
+                    <div className="mt-4 p-4 bg-gray-50 rounded-xl">
+                      <h3 className="text-sm font-semibold mb-2">Unassigned Guests</h3>
+                      <div className="flex flex-wrap gap-2">
+                        {guests.filter(g => !g.table).map((guest) => (
+                          <div
+                            key={guest.id}
+                            className="px-3 py-2 bg-white border border-gray-300 rounded-lg cursor-move shadow-sm hover:shadow-md transition-shadow"
+                            draggable
+                            data-guest-id={guest.id}
+                            title={guest.name}
+                          >
+                            <div className="text-sm font-medium">{guest.name}</div>
+                            {guest.tags.length > 0 && (
+                              <div className="flex gap-1 mt-1">
+                                {guest.tags.slice(0, 2).map((tag, index) => (
+                                  <span key={index} className="px-1 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
