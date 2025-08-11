@@ -13,6 +13,8 @@ interface Guest {
   id: string;
   name: string;
   table: number | null;
+  notes: string;
+  tags: string[];
 }
 
 // ----------------------
@@ -107,6 +109,10 @@ export default function SeatingPlanner() {
   const [tableInput, setTableInput] = useState<number | "">("");
   const [search, setSearch] = useState("");
   const [importError, setImportError] = useState("");
+  const [duplicateWarning, setDuplicateWarning] = useState<string[]>([]);
+  const [editingGuest, setEditingGuest] = useState<string | null>(null);
+  const [editingNotes, setEditingNotes] = useState("");
+  const [editingTags, setEditingTags] = useState("");
 
   // Load persisted state
   useEffect(() => {
@@ -166,7 +172,7 @@ export default function SeatingPlanner() {
       }
     }
 
-    const newGuest: Guest = { id: uid(), name, table: intendedTable };
+    const newGuest: Guest = { id: uid(), name, table: intendedTable, notes: "", tags: [] };
     setGuests((prev) => [newGuest, ...prev]);
     setNameInput("");
     setTableInput("");
@@ -176,6 +182,41 @@ export default function SeatingPlanner() {
     setGuests((prev) =>
       prev.map((g) => (g.id === guestId ? { ...g, table: newTable } : g))
     );
+  }
+
+  function updateGuestNotes(guestId: string, notes: string) {
+    setGuests((prev) =>
+      prev.map((g) => (g.id === guestId ? { ...g, notes } : g))
+    );
+  }
+
+  function updateGuestTags(guestId: string, tags: string[]) {
+    setGuests((prev) =>
+      prev.map((g) => (g.id === guestId ? { ...g, tags } : g))
+    );
+  }
+
+  function startEditing(guest: Guest) {
+    setEditingGuest(guest.id);
+    setEditingNotes(guest.notes);
+    setEditingTags(guest.tags.join(', '));
+  }
+
+  function saveEditing() {
+    if (editingGuest) {
+      const tags = editingTags.split(',').map(tag => tag.trim()).filter(tag => tag.length > 0);
+      updateGuestNotes(editingGuest, editingNotes);
+      updateGuestTags(editingGuest, tags);
+      setEditingGuest(null);
+      setEditingNotes("");
+      setEditingTags("");
+    }
+  }
+
+  function cancelEditing() {
+    setEditingGuest(null);
+    setEditingNotes("");
+    setEditingTags("");
   }
 
   function removeGuest(id: string) {
@@ -218,7 +259,9 @@ export default function SeatingPlanner() {
           const newGuests = guestNames.map(name => ({
             id: uid(),
             name: name.trim(),
-            table: null
+            table: null,
+            notes: "",
+            tags: []
           }));
           
           setGuests(prev => [...prev, ...newGuests]);
@@ -239,7 +282,9 @@ export default function SeatingPlanner() {
           const newGuests = guestNames.map(name => ({
             id: uid(),
             name: name.trim(),
-            table: null
+            table: null,
+            notes: "",
+            tags: []
           }));
           
           setGuests(prev => [...prev, ...newGuests]);
@@ -250,28 +295,122 @@ export default function SeatingPlanner() {
     }
   }
 
+  function checkForDuplicates(newNames: string[]): string[] {
+    const duplicates: string[] = [];
+    const existingNames = guests.map(g => g.name.toLowerCase());
+    
+    newNames.forEach(name => {
+      const nameLower = name.toLowerCase();
+      
+      // Check for exact matches
+      if (existingNames.includes(nameLower)) {
+        duplicates.push(`${name} (exact match)`);
+        return;
+      }
+      
+      // Check for near-duplicates (similar names)
+      existingNames.forEach(existing => {
+        if (existing !== nameLower) {
+          // Simple similarity check - you could make this more sophisticated
+          const similarity = calculateSimilarity(nameLower, existing);
+          if (similarity > 0.8) { // 80% similarity threshold
+            duplicates.push(`${name} (similar to "${guests.find(g => g.name.toLowerCase() === existing)?.name}")`);
+          }
+        }
+      });
+    });
+    
+    return [...new Set(duplicates)]; // Remove duplicates
+  }
+
+  function calculateSimilarity(str1: string, str2: string): number {
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+    
+    if (longer.length === 0) return 1.0;
+    
+    const editDistance = levenshteinDistance(longer, shorter);
+    return (longer.length - editDistance) / longer.length;
+  }
+
+  function levenshteinDistance(str1: string, str2: string): number {
+    const matrix = [];
+    
+    for (let i = 0; i <= str2.length; i++) {
+      matrix[i] = [i];
+    }
+    
+    for (let j = 0; j <= str1.length; j++) {
+      matrix[0][j] = j;
+    }
+    
+    for (let i = 1; i <= str2.length; i++) {
+      for (let j = 1; j <= str1.length; j++) {
+        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1,
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
+          );
+        }
+      }
+    }
+    
+    return matrix[str2.length][str1.length];
+  }
+
   function handlePasteImport() {
-    const pastedText = prompt("Paste your guest list (one name per line):");
+    const pastedText = prompt("Paste your guest list (one name per line):\n\nYou can use @table shorthand: \"Sam Lee @7\" to assign to table 7");
     if (!pastedText) return;
     
     setImportError("");
     try {
-      const guestNames = pastedText.split('\n')
+      const lines = pastedText.split('\n')
         .map(line => line.trim())
-        .filter(name => name.length > 0);
+        .filter(line => line.length > 0);
       
-      if (guestNames.length === 0) {
+      if (lines.length === 0) {
         setImportError("No valid guest names found");
         return;
       }
       
-      const newGuests = guestNames.map(name => ({
+      const names = lines.map(line => {
+        // Check for @table shorthand
+        const tableMatch = line.match(/@(\d+)$/);
+        let name = line.trim();
+        let tableNumber: number | null = null;
+        
+        if (tableMatch) {
+          name = line.replace(/@\d+$/, '').trim();
+          const tableNum = parseInt(tableMatch[1]);
+          if (tableNum >= 1 && tableNum <= tables) {
+            tableNumber = tableNum;
+          }
+        }
+        
+        return { name, tableNumber };
+      });
+      
+      // Check for duplicates
+      const duplicates = checkForDuplicates(names.map(n => n.name));
+      if (duplicates.length > 0) {
+        setDuplicateWarning(duplicates);
+        const proceed = confirm(`Potential duplicates found:\n\n${duplicates.join('\n')}\n\nContinue anyway?`);
+        if (!proceed) return;
+      }
+      
+      const newGuests = names.map(({ name, tableNumber }) => ({
         id: uid(),
-        name: name.trim(),
-        table: null
+        name: name,
+        table: tableNumber,
+        notes: "",
+        tags: []
       }));
       
       setGuests(prev => [...prev, ...newGuests]);
+      setDuplicateWarning([]);
     } catch (error) {
       setImportError("Error processing pasted text");
     }
@@ -391,6 +530,16 @@ export default function SeatingPlanner() {
               {importError && (
                 <p className="mt-2 text-sm text-red-600">{importError}</p>
               )}
+              {duplicateWarning.length > 0 && (
+                <div className="mt-2 p-3 bg-yellow-50 border border-yellow-200 rounded-xl">
+                  <p className="text-sm font-medium text-yellow-800 mb-2">⚠️ Potential duplicates detected:</p>
+                  <ul className="text-sm text-yellow-700 space-y-1">
+                    {duplicateWarning.map((warning, index) => (
+                      <li key={index}>• {warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <p className="mt-2 text-xs text-gray-500">
                 Supported formats: CSV, Excel (.xlsx, .xls), or plain text. First column should contain guest names.
               </p>
@@ -412,36 +561,103 @@ export default function SeatingPlanner() {
               ) : (
                 <ul className="divide-y">
                   {filteredGuests.map((g) => (
-                    <li key={g.id} className="flex flex-wrap items-center gap-3 py-3">
-                      <span className="flex-1 min-w-[180px] font-medium">{g.name}</span>
-                      <select
-                        className="w-40 rounded-xl border border-gray-300 bg-white px-3 py-2 shadow-sm focus:outline-none focus:ring-2"
-                        value={g.table ?? ""}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (val === "") return assignTable(g.id, null);
-                          const newTable = Number(val);
-                          const current = tableMap.get(newTable) ?? [];
-                          if (current.length >= capacity) {
-                            alert(`Table ${newTable} is full (${capacity}).`);
-                            return;
-                          }
-                          assignTable(g.id, newTable);
-                        }}
-                      >
-                        <option value="">No table</option>
-                        {Array.from({ length: tables }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>
-                            Table {n} ({(tableMap.get(n) ?? []).length}/{capacity})
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => removeGuest(g.id)}
-                        className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
-                      >
-                        Remove
-                      </button>
+                    <li key={g.id} className="py-3">
+                      {/* Main guest info row */}
+                      <div className="flex flex-wrap items-center gap-3 mb-2">
+                        <span className="flex-1 min-w-[180px] font-medium">{g.name}</span>
+                        <select
+                          className="w-40 rounded-xl border border-gray-300 bg-white px-3 py-2 shadow-sm focus:outline-none focus:ring-2"
+                          value={g.table ?? ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === "") return assignTable(g.id, null);
+                            const newTable = Number(val);
+                            const current = tableMap.get(newTable) ?? [];
+                            if (current.length >= capacity) {
+                              alert(`Table ${newTable} is full (${capacity}).`);
+                              return;
+                            }
+                            assignTable(g.id, newTable);
+                          }}
+                        >
+                          <option value="">No table</option>
+                          {Array.from({ length: tables }, (_, i) => i + 1).map((n) => (
+                            <option key={n} value={n}>
+                              Table {n} ({(tableMap.get(n) ?? []).length}/{capacity})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => startEditing(g)}
+                          className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                        >
+                          {editingGuest === g.id ? "Cancel" : "Edit"}
+                        </button>
+                        <button
+                          onClick={() => removeGuest(g.id)}
+                          className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      
+                      {/* Tags display */}
+                      {g.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2">
+                          {g.tags.map((tag, index) => (
+                            <span key={index} className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      
+                      {/* Notes display */}
+                      {g.notes && (
+                        <div className="text-sm text-gray-600 mb-2 italic">
+                          📝 {g.notes}
+                        </div>
+                      )}
+                      
+                      {/* Edit mode */}
+                      {editingGuest === g.id && (
+                        <div className="mt-3 p-3 bg-gray-50 rounded-xl">
+                          <div className="mb-3">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Notes:</label>
+                            <textarea
+                              value={editingNotes}
+                              onChange={(e) => setEditingNotes(e.target.value)}
+                              placeholder="Dietary restrictions, accessibility needs, etc."
+                              className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2 shadow-sm focus:outline-none focus:ring-2 text-sm"
+                              rows={2}
+                            />
+                          </div>
+                          <div className="mb-3">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Tags (comma-separated):</label>
+                            <input
+                              type="text"
+                              value={editingTags}
+                              onChange={(e) => setEditingTags(e.target.value)}
+                              placeholder="family, friends, kids, VIP"
+                              className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2 shadow-sm focus:outline-none focus:ring-2 text-sm"
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={saveEditing}
+                              className="rounded-xl bg-black px-3 py-2 text-white text-sm shadow hover:opacity-90"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={cancelEditing}
+                              className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
