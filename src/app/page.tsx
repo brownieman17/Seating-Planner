@@ -17,6 +17,25 @@ interface Guest {
   tags: string[];
 }
 
+interface Table {
+  id: string;
+  number: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  capacity: number;
+  shape: 'round' | 'rect';
+  guests: string[]; // Array of guest IDs
+}
+
+interface CanvasState {
+  tables: Table[];
+  selectedTable: string | null;
+  draggingGuest: string | null;
+  dragOffset: { x: number; y: number };
+}
+
 // ----------------------
 // Utils
 // ----------------------
@@ -113,6 +132,13 @@ export default function SeatingPlanner() {
   const [editingGuest, setEditingGuest] = useState<string | null>(null);
   const [editingNotes, setEditingNotes] = useState("");
   const [editingTags, setEditingTags] = useState("");
+  const [showCanvas, setShowCanvas] = useState(false);
+  const [canvasState, setCanvasState] = useState<CanvasState>({
+    tables: [],
+    selectedTable: null,
+    draggingGuest: null,
+    dragOffset: { x: 0, y: 0 }
+  });
 
   // Load persisted state
   useEffect(() => {
@@ -122,13 +148,14 @@ export default function SeatingPlanner() {
       setTables(saved.tables ?? 16);
       setCapacity(saved.capacity ?? 10);
       setGuests(saved.guests ?? []);
+      setCanvasState(saved.canvasState ?? { tables: [], selectedTable: null, draggingGuest: null, dragOffset: { x: 0, y: 0 } });
     }
   }, []);
 
   // Persist on changes
   useEffect(() => {
-    saveState({ eventName, tables, capacity, guests });
-  }, [eventName, tables, capacity, guests]);
+    saveState({ eventName, tables, capacity, guests, canvasState });
+  }, [eventName, tables, capacity, guests, canvasState]);
 
   const filteredGuests = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -217,6 +244,177 @@ export default function SeatingPlanner() {
     setEditingGuest(null);
     setEditingNotes("");
     setEditingTags("");
+  }
+
+  // Canvas utility functions
+  function createTable(x: number, y: number, shape: 'round' | 'rect' = 'round'): Table {
+    const tableNumber = canvasState.tables.length + 1;
+    return {
+      id: uid(),
+      number: tableNumber,
+      x,
+      y,
+      width: shape === 'round' ? 120 : 140,
+      height: shape === 'round' ? 120 : 100,
+      capacity: 8,
+      shape,
+      guests: []
+    };
+  }
+
+  function addTableToCanvas(x: number, y: number, shape: 'round' | 'rect' = 'round') {
+    const newTable = createTable(x, y, shape);
+    setCanvasState(prev => ({
+      ...prev,
+      tables: [...prev.tables, newTable]
+    }));
+  }
+
+  function updateTablePosition(tableId: string, x: number, y: number) {
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(table => 
+        table.id === tableId ? { ...table, x, y } : table
+      )
+    }));
+  }
+
+  function updateTableCapacity(tableId: string, capacity: number) {
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(table => 
+        table.id === tableId ? { ...table, capacity } : table
+      )
+    }));
+  }
+
+  function removeTableFromCanvas(tableId: string) {
+    // Move guests back to unassigned
+    const table = canvasState.tables.find(t => t.id === tableId);
+    if (table) {
+      setGuests(prev => prev.map(guest => 
+        table.guests.includes(guest.id) ? { ...guest, table: null } : guest
+      ));
+    }
+    
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.filter(t => t.id !== tableId)
+    }));
+  }
+
+  function addGuestToTable(guestId: string, tableId: string) {
+    const table = canvasState.tables.find(t => t.id === tableId);
+    if (!table) return;
+
+    // Check capacity
+    if (table.guests.length >= table.capacity) {
+      alert(`Table ${table.number} is full (${table.capacity}).`);
+      return;
+    }
+
+    // Remove guest from any other table first
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(t => ({
+        ...t,
+        guests: t.guests.filter(g => g !== guestId)
+      }))
+    }));
+
+    // Add guest to new table
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(t => 
+        t.id === tableId ? { ...t, guests: [...t.guests, guestId] } : t
+      )
+    }));
+
+    // Update guest's table assignment
+    setGuests(prev => prev.map(g => 
+      g.id === guestId ? { ...g, table: table.number } : g
+    ));
+  }
+
+  function removeGuestFromTable(guestId: string) {
+    setCanvasState(prev => ({
+      ...prev,
+      tables: prev.tables.map(t => ({
+        ...t,
+        guests: t.guests.filter(g => g !== guestId)
+      }))
+    }));
+
+    setGuests(prev => prev.map(g => 
+      g.id === guestId ? { ...g, table: null } : g
+    ));
+  }
+
+  function handleCanvasClick(e: React.MouseEvent) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // Add a round table at click position
+    addTableToCanvas(x, y, 'round');
+  }
+
+  function handleTableDragStart(e: React.MouseEvent, tableId: string) {
+    e.stopPropagation();
+    setCanvasState(prev => ({ ...prev, selectedTable: tableId }));
+  }
+
+  function handleTableDrag(e: React.MouseEvent) {
+    if (!canvasState.selectedTable) return;
+    
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    updateTablePosition(canvasState.selectedTable, x, y);
+  }
+
+  function handleTableDragEnd() {
+    setCanvasState(prev => ({ ...prev, selectedTable: null }));
+  }
+
+  function handleGuestDragStart(e: React.MouseEvent, guestId: string) {
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    setCanvasState(prev => ({
+      ...prev,
+      draggingGuest: guestId,
+      dragOffset: {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      }
+    }));
+  }
+
+  function handleGuestDrag(e: React.MouseEvent) {
+    if (!canvasState.draggingGuest) return;
+    
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // Check if guest is over a table
+    const tableUnder = canvasState.tables.find(table => {
+      const tableCenterX = table.x + table.width / 2;
+      const tableCenterY = table.y + table.height / 2;
+      const distance = Math.sqrt(
+        Math.pow(x - tableCenterX, 2) + Math.pow(y - tableCenterY, 2)
+      );
+      return distance < Math.max(table.width, table.height) / 2;
+    });
+    
+    if (tableUnder) {
+      addGuestToTable(canvasState.draggingGuest, tableUnder.id);
+    }
+  }
+
+  function handleGuestDragEnd() {
+    setCanvasState(prev => ({ ...prev, draggingGuest: null }));
   }
 
   function removeGuest(id: string) {
@@ -361,6 +559,28 @@ export default function SeatingPlanner() {
     return matrix[str2.length][str1.length];
   }
 
+  function exportToCSV() {
+    const csvContent = [
+      'Name,Table,Notes,Tags',
+      ...guests.map(guest => {
+        const tableName = guest.table ? `Table ${guest.table}` : 'Unassigned';
+        const notes = guest.notes.replace(/"/g, '""'); // Escape quotes
+        const tags = guest.tags.join(';');
+        return `"${guest.name}","${tableName}","${notes}","${tags}"`;
+      })
+    ].join('\n');
+    
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${eventName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_seating_plan.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  }
+
   function handlePasteImport() {
     const pastedText = prompt("Paste your guest list (one name per line):\n\nYou can use @table shorthand: \"Sam Lee @7\" to assign to table 7");
     if (!pastedText) return;
@@ -461,6 +681,12 @@ export default function SeatingPlanner() {
               Clear assignments
             </button>
             <button
+              onClick={() => setShowCanvas(!showCanvas)}
+              className="rounded-xl bg-blue-50 px-3 py-2 text-sm text-blue-700 shadow-sm hover:bg-blue-100"
+            >
+              {showCanvas ? "List View" : "Room Canvas"}
+            </button>
+            <button
               onClick={clearAll}
               className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700 shadow-sm hover:bg-red-100"
             >
@@ -525,6 +751,12 @@ export default function SeatingPlanner() {
                   className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm shadow-sm hover:bg-gray-100"
                 >
                   Paste List
+                </button>
+                <button
+                  onClick={exportToCSV}
+                  className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm shadow-sm hover:bg-gray-100"
+                >
+                  Export CSV
                 </button>
               </div>
               {importError && (
@@ -713,6 +945,145 @@ export default function SeatingPlanner() {
             </div>
           </aside>
         </section>
+
+        {/* Room Canvas */}
+        {showCanvas && (
+          <section className="mt-6">
+            <div className="rounded-2xl bg-white p-4 shadow">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-semibold">Room Layout</h2>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => addTableToCanvas(100, 100, 'round')}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                  >
+                    Add Round Table
+                  </button>
+                  <button
+                    onClick={() => addTableToCanvas(100, 100, 'rect')}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-100"
+                  >
+                    Add Rectangular Table
+                  </button>
+                </div>
+              </div>
+              
+              <div className="mb-4 text-sm text-gray-600">
+                <p>• Click anywhere on the canvas to add a round table</p>
+                <p>• Drag tables to reposition them</p>
+                <p>• Drag guests from the list onto tables</p>
+                <p>• Right-click tables to edit capacity or remove</p>
+              </div>
+
+              <div className="relative">
+                {/* Canvas */}
+                <div 
+                  className="relative w-full h-96 bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl cursor-crosshair overflow-hidden"
+                  onClick={handleCanvasClick}
+                  onMouseMove={handleTableDrag}
+                  onMouseUp={handleTableDragEnd}
+                >
+                  {/* Tables */}
+                  {canvasState.tables.map((table) => (
+                    <div
+                      key={table.id}
+                      className={`absolute cursor-move ${
+                        canvasState.selectedTable === table.id ? 'ring-2 ring-blue-500' : ''
+                      }`}
+                      style={{
+                        left: table.x,
+                        top: table.y,
+                        width: table.width,
+                        height: table.height
+                      }}
+                      onMouseDown={(e) => handleTableDragStart(e, table.id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        const action = prompt(
+                          `Table ${table.number} (${table.guests.length}/${table.capacity})\n\n1. Change capacity\n2. Remove table\n\nEnter 1 or 2:`
+                        );
+                        if (action === '1') {
+                          const newCapacity = prompt(`Enter new capacity (current: ${table.capacity}):`);
+                          if (newCapacity) {
+                            const capacity = parseInt(newCapacity);
+                            if (!isNaN(capacity) && capacity > 0) {
+                              updateTableCapacity(table.id, capacity);
+                            }
+                          }
+                        } else if (action === '2') {
+                          if (confirm(`Remove table ${table.number}?`)) {
+                            removeTableFromCanvas(table.id);
+                          }
+                        }
+                      }}
+                    >
+                      {/* Table shape */}
+                      <div
+                        className={`w-full h-full border-2 border-gray-400 bg-white flex flex-col items-center justify-center ${
+                          table.shape === 'round' ? 'rounded-full' : 'rounded-lg'
+                        }`}
+                      >
+                        <div className="text-sm font-bold">Table {table.number}</div>
+                        <div className="text-xs text-gray-600">
+                          {table.guests.length}/{table.capacity}
+                        </div>
+                      </div>
+                      
+                      {/* Guests at table */}
+                      <div className="absolute -bottom-8 left-0 right-0">
+                        <div className="flex flex-wrap gap-1 justify-center">
+                          {table.guests.map((guestId) => {
+                            const guest = guests.find(g => g.id === guestId);
+                            return guest ? (
+                              <div
+                                key={guestId}
+                                className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full cursor-move"
+                                draggable
+                                onDragStart={(e) => handleGuestDragStart(e, guestId)}
+                                onDragEnd={handleGuestDragEnd}
+                                title={guest.name}
+                              >
+                                {guest.name.split(' ')[0]}
+                              </div>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Unassigned guests panel */}
+                <div className="mt-4 p-4 bg-gray-50 rounded-xl">
+                  <h3 className="text-sm font-semibold mb-2">Unassigned Guests</h3>
+                  <div className="flex flex-wrap gap-2">
+                    {guests.filter(g => !g.table).map((guest) => (
+                      <div
+                        key={guest.id}
+                        className="px-3 py-2 bg-white border border-gray-300 rounded-lg cursor-move shadow-sm hover:shadow-md transition-shadow"
+                        draggable
+                        onDragStart={(e) => handleGuestDragStart(e, guest.id)}
+                        onDragEnd={handleGuestDragEnd}
+                        title={guest.name}
+                      >
+                        <div className="text-sm font-medium">{guest.name}</div>
+                        {guest.tags.length > 0 && (
+                          <div className="flex gap-1 mt-1">
+                            {guest.tags.slice(0, 2).map((tag, index) => (
+                              <span key={index} className="px-1 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
         <footer className="mt-8 text-center text-xs text-gray-500">
           Built for quick planning. Data saves in your browser only.
